@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/dialer"
 	"github.com/delimitrou/DeathStarBench/tree/master/hotelReservation/registry"
@@ -102,6 +103,22 @@ func (s *Server) Run() error {
 	mux.Handle("/museums", http.HandlerFunc(s.museumHandler))
 	mux.Handle("/cinema", http.HandlerFunc(s.cinemaHandler))
 	mux.Handle("/reservation", http.HandlerFunc(s.reservationHandler))
+	/*
+	   local searchclient_nearby_ratio = 0
+	   local reservationclient_checkavailability_ratio = 0
+	   local recommendationclient_getrecommendations_ratio = 0
+	   local profileclient_getprofiles_ratio = 0
+	   local userclient_checkUser_ratio = 0
+	   local reservationclient_makereservation_ratio = 0
+	*/
+	mux.Handle("/searchclient_nearby", http.HandlerFunc(s.searchClientNearby))
+	mux.Handle("/reservationclient_checkavailability", http.HandlerFunc(s.reservationClientCheckAvailability))
+	mux.Handle("/recommendationclient_getrecommendations", http.HandlerFunc(s.recommendationClientGetRecommendations))
+	mux.Handle("/profileclient_getprofiles", http.HandlerFunc(s.profileClientGetProfiles))
+	mux.Handle("/userclient_checkUser", http.HandlerFunc(s.userClientCheckUser))
+	mux.Handle("/reservationclient_makereservation", http.HandlerFunc(s.reservationClientMakeReservation))
+	mux.Handle("/attractionsclient_nearbyRest", http.HandlerFunc(s.attractionsClientNearbyRest))
+	mux.Handle("/reviewclient_getReviews", http.HandlerFunc(s.reviewClientGetReviews))
 
 	log.Trace().Msg("frontend starts serving")
 
@@ -209,6 +226,81 @@ func (s *Server) getGprcConn(name string) (*grpc.ClientConn, error) {
 	}
 }
 
+func (s *Server) searchClientNearby(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+
+	log.Trace().Msg("starts searchHandler")
+
+	// in/out dates from query params
+	inDate, outDate := r.URL.Query().Get("inDate"), r.URL.Query().Get("outDate")
+	if inDate == "" || outDate == "" {
+		http.Error(w, "Please specify inDate/outDate params", http.StatusBadRequest)
+		return
+	}
+
+	// lan/lon from query params
+	sLat, sLon := r.URL.Query().Get("lat"), r.URL.Query().Get("lon")
+	if sLat == "" || sLon == "" {
+		http.Error(w, "Please specify location params", http.StatusBadRequest)
+		return
+	}
+
+	Lat, _ := strconv.ParseFloat(sLat, 32)
+	lat := float32(Lat)
+	Lon, _ := strconv.ParseFloat(sLon, 32)
+	lon := float32(Lon)
+
+	log.Trace().Msg("starts searchHandler querying downstream")
+
+	log.Trace().Msgf("SEARCH [lat: %v, lon: %v, inDate: %v, outDate: %v", lat, lon, inDate, outDate)
+	// search for best hotels
+	searchResp, err := s.searchClient.Nearby(ctx, &search.NearbyRequest{
+		Lat:     lat,
+		Lon:     lon,
+		InDate:  inDate,
+		OutDate: outDate,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(searchResp)
+}
+
+func (s *Server) reservationClientCheckAvailability(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+
+	// in/out dates from query params
+	inDate, outDate := r.URL.Query().Get("inDate"), r.URL.Query().Get("outDate")
+	if inDate == "" || outDate == "" {
+		http.Error(w, "Please specify inDate/outDate params", http.StatusBadRequest)
+		return
+	}
+
+	hotelIds := strings.Split(r.URL.Query().Get("hotelIds"), ",")
+	locale := r.URL.Query().Get("locale")
+	if locale == "" {
+		locale = "en"
+	}
+
+	reservationResp, err := s.reservationClient.CheckAvailability(ctx, &reservation.Request{
+		CustomerName: "",
+		HotelId:      hotelIds,
+		InDate:       inDate,
+		OutDate:      outDate,
+		RoomNumber:   1,
+	})
+	if err != nil {
+		log.Error().Msg("SearchHandler CheckAvailability failed")
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(reservationResp)
+}
+
 func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ctx := r.Context()
@@ -292,6 +384,60 @@ func (s *Server) searchHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(geoJSONResponse(profileResp.Hotels))
 }
 
+func (s *Server) recommendationClientGetRecommendations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+
+	sLat, sLon := r.URL.Query().Get("lat"), r.URL.Query().Get("lon")
+	if sLat == "" || sLon == "" {
+		http.Error(w, "Please specify location params", http.StatusBadRequest)
+		return
+	}
+	Lat, _ := strconv.ParseFloat(sLat, 64)
+	lat := float64(Lat)
+	Lon, _ := strconv.ParseFloat(sLon, 64)
+	lon := float64(Lon)
+
+	require := r.URL.Query().Get("require")
+	if require != "dis" && require != "rate" && require != "price" {
+		http.Error(w, "Please specify require params", http.StatusBadRequest)
+		return
+	}
+
+	// recommend hotels
+	recResp, _ := s.recommendationClient.GetRecommendations(ctx, &recommendation.Request{
+		Require: require,
+		Lat:     float64(lat),
+		Lon:     float64(lon),
+	})
+	json.NewEncoder(w).Encode(recResp.String())
+}
+
+func (s *Server) profileClientGetProfiles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+	hotelIds := strings.Split(r.URL.Query().Get("hotelIds"), ",")
+
+	// grab locale from query params or default to en
+	locale := r.URL.Query().Get("locale")
+	if locale == "" {
+		locale = "en"
+	}
+
+	// hotel profiles
+	profileResp, err := s.profileClient.GetProfiles(ctx, &profile.Request{
+		HotelIds: hotelIds,
+		Locale:   locale,
+	})
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(geoJSONResponse(profileResp.Hotels))
+}
+
 func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ctx := r.Context()
@@ -342,6 +488,59 @@ func (s *Server) recommendHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(geoJSONResponse(profileResp.Hotels))
 }
 
+func (s *Server) userClientCheckUser(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+
+	username, password := r.URL.Query().Get("username"), r.URL.Query().Get("password")
+	if username == "" || password == "" {
+		http.Error(w, "Please specify username and password", http.StatusBadRequest)
+		return
+	}
+
+	// Check username and password
+	recResp, err := s.userClient.CheckUser(ctx, &user.Request{
+		Username: username,
+		Password: password,
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(recResp)
+}
+
+func (s *Server) reviewClientGetReviews(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+	str := "Logged-in successfully!"
+	hotelId := r.URL.Query().Get("hotelId")
+	if hotelId == "" {
+		http.Error(w, "Please specify hotelId params", http.StatusBadRequest)
+		return
+	}
+
+	revInput := review.Request{HotelId: hotelId}
+
+	revResp, err := s.reviewClient.GetReviews(ctx, &revInput)
+
+	str = "Have reviews = " + strconv.Itoa(len(revResp.Reviews))
+	if len(revResp.Reviews) == 0 {
+		str = "Failed. No Reviews. "
+	}
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	res := map[string]interface{}{
+		"message": str,
+	}
+
+	json.NewEncoder(w).Encode(res)
+}
+
 func (s *Server) reviewHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	ctx := r.Context()
@@ -380,6 +579,37 @@ func (s *Server) reviewHandler(w http.ResponseWriter, r *http.Request) {
 	str = "Have reviews = " + strconv.Itoa(len(revResp.Reviews))
 	if len(revResp.Reviews) == 0 {
 		str = "Failed. No Reviews. "
+	}
+
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	res := map[string]interface{}{
+		"message": str,
+	}
+
+	json.NewEncoder(w).Encode(res)
+}
+
+func (s *Server) attractionsClientNearbyRest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+	str := "Logged-in successfully!"
+	hotelId := r.URL.Query().Get("hotelId")
+	if hotelId == "" {
+		http.Error(w, "Please specify hotelId params", http.StatusBadRequest)
+		return
+	}
+
+	revInput := attractions.Request{HotelId: hotelId}
+
+	revResp, err := s.attractionsClient.NearbyRest(ctx, &revInput)
+
+	str = "Have restaurants = " + strconv.Itoa(len(revResp.AttractionIds))
+	if len(revResp.AttractionIds) == 0 {
+		str = "Failed. No Restaurants. "
 	}
 
 	if err != nil {
@@ -573,6 +803,70 @@ func (s *Server) userHandler(w http.ResponseWriter, r *http.Request) {
 	str := "Login successfully!"
 	if recResp.Correct == false {
 		str = "Failed. Please check your username and password. "
+	}
+
+	res := map[string]interface{}{
+		"message": str,
+	}
+
+	json.NewEncoder(w).Encode(res)
+}
+
+func (s *Server) reservationClientMakeReservation(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	ctx := r.Context()
+
+	inDate, outDate := r.URL.Query().Get("inDate"), r.URL.Query().Get("outDate")
+	if inDate == "" || outDate == "" {
+		http.Error(w, "Please specify inDate/outDate params", http.StatusBadRequest)
+		return
+	}
+
+	if !checkDataFormat(inDate) || !checkDataFormat(outDate) {
+		http.Error(w, "Please check inDate/outDate format (YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+
+	hotelId := r.URL.Query().Get("hotelId")
+	if hotelId == "" {
+		http.Error(w, "Please specify hotelId params", http.StatusBadRequest)
+		return
+	}
+
+	customerName := r.URL.Query().Get("customerName")
+	if customerName == "" {
+		http.Error(w, "Please specify customerName params", http.StatusBadRequest)
+		return
+	}
+
+	username, password := r.URL.Query().Get("username"), r.URL.Query().Get("password")
+	if username == "" || password == "" {
+		http.Error(w, "Please specify username and password", http.StatusBadRequest)
+		return
+	}
+
+	numberOfRoom := 0
+	num := r.URL.Query().Get("number")
+	if num != "" {
+		numberOfRoom, _ = strconv.Atoi(num)
+	}
+
+	str := "Reserve successfully!"
+
+	// Make reservation
+	resResp, err := s.reservationClient.MakeReservation(ctx, &reservation.Request{
+		CustomerName: customerName,
+		HotelId:      []string{hotelId},
+		InDate:       inDate,
+		OutDate:      outDate,
+		RoomNumber:   int32(numberOfRoom),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(resResp.HotelId) == 0 {
+		str = "Failed. Already reserved. "
 	}
 
 	res := map[string]interface{}{
